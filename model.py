@@ -3,6 +3,14 @@ from typing import List, Dict, Optional
 from aixblock_ml.model import AIxBlockMLBase
 from ultralytics import YOLO
 import os
+from git import Repo
+import zipfile
+import subprocess
+import requests
+from IPython.display import Image
+import yaml
+
+HOST_NAME = os.environ.get('HOST_NAME',"https://app.aixblock.io")
 
 css = """
 @import "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css";
@@ -111,6 +119,55 @@ window.addEventListener("DOMContentLoaded", function() {
 });
 """
 
+def download_checkpoint(weight_zip_path, weights_path, project_id, checkpoint_id, token):
+    url = f"{HOST_NAME}/api/checkpoint_model_marketplace/download/{checkpoint_id}?project_id={project_id}"
+    print(url)
+    payload = {}
+    headers = {
+    'accept': 'application/json',
+    # 'Authorization': 'Token 5d3604c4c57def9a192950ef7b90d7f1e0bb05c1'
+    'Authorization': f'Token {token}'
+    }
+    response = requests.request("GET", url, headers=headers, data=payload) 
+    with open(weight_zip_path, 'wb') as f:
+        f.write(response.content)
+
+    with zipfile.ZipFile(weight_zip_path, 'r') as zip_ref:
+        zip_ref.extractall(weights_path)
+
+def download_dataset(data_zip_dir, dataset_path, project_id, dataset_id, token):
+    # data_zip_path = os.path.join(data_zip_dir, "data.zip")
+    url = f"{HOST_NAME}/api/dataset_model_marketplace/download/{dataset_id}?project_id={project_id}"
+    payload = {}
+    headers = {
+    'accept': 'application/json',
+    'Authorization': f'Token {token}'
+    }
+
+    response = requests.request("GET", url, headers=headers, data=payload) 
+    with open(data_zip_dir, 'wb') as f:
+        f.write(response.content)
+    
+    with zipfile.ZipFile(data_zip_dir, 'r') as zip_ref:
+        zip_ref.extractall(dataset_path)
+
+def upload_checkpoint(checkpoint_model_dir, project_id, token):
+    url = f"{HOST_NAME}/api/checkpoint_model_marketplace/upload/"
+
+    payload = {
+        "type_checkpoint": "ml_checkpoint",
+        "project_id": f'{project_id}'
+    }
+    headers = {
+    'accept': 'application/json',
+    'Authorization': f'Token {token}'
+    }
+
+    # response = requests.request("POST", url, headers=headers, data=payload) 
+    with open(checkpoint_model_dir, 'rb') as file:
+        files = {'file': file}
+        response = requests.post(url, headers=headers, files=files, data=payload)
+        print(response.text)
 
 class MyModel(AIxBlockMLBase):
 
@@ -155,25 +212,90 @@ class MyModel(AIxBlockMLBase):
               project: {project},
                 command: {command},
                 collection: {collection},
+                kwargs: {kwargs}
               """)
+              
         if command.lower() == "train":
             try:
-                checkpoint = kwargs.get("checkpoint")
-                if checkpoint:
-                    model = YOLO(f"checkpoints/uploads/{checkpoint}")
-                else:
-                    model = YOLO("yolov8n.pt")
-
+                clone_dir = os.path.join(os.getcwd(), "yolov8")
+                
                 epochs = kwargs.get("epochs", 2)
                 imgsz = kwargs.get("imgsz", 640)
-                data = kwargs.get("data", "coco8.yaml")
-                # check if folder named project exists
-                if not os.path.exists(f"./yolov8/{project}"):
-                    os.makedirs(f"./yolov8/{project}")
-                result = model.train(data=data, imgsz=imgsz, epochs=epochs, project=f"./yolov8/{project}")
+                project_id = kwargs.get("project_id")
+                token = kwargs.get("token")
+
+                os.makedirs(f'{clone_dir}/data_zip', exist_ok=True)
+
+                weight_path = os.path.join(clone_dir, f"models")
+                dataset_path = os.path.join(clone_dir, f"datasets/dataset0") 
+                data_train_dir = os.path.join(dataset_path, "dota8.yaml")
+
+                if kwargs.get("checkpoint"):
+                    checkpoint_id = kwargs.get("checkpoint")
+                    weight_path = os.path.join(clone_dir, f"models/{checkpoint_id}")
+                    weight_zip_path = os.path.join(clone_dir, "data_zip/weights.zip")
+                    print(weight_zip_path)
+                    download_checkpoint(weight_zip_path, weight_path, project_id, checkpoint_id, token)
+
+                if  kwargs.get("dataset"):
+                    dataset_id = kwargs.get("dataset")
+                    data_zip_dir = os.path.join(clone_dir, "data_zip/data.zip")
+                    dataset_path = os.path.join(clone_dir, f"datasets/{dataset_id}") 
+                    download_dataset(data_zip_dir, dataset_path, project_id, checkpoint_id, token)
+
+                    data_train_dir = os.path.join(dataset_path, "data.yaml")
+                    with open(data_train_dir, 'r') as file:
+                        data_yaml = yaml.safe_load(file)
+                    
+                    # Thay thế các đường dẫn
+                    data_yaml['train'] = os.path.join('train', 'images')
+                    data_yaml['val'] = os.path.join('valid', 'images')
+                    data_yaml['test'] = os.path.join('test', 'images')
+
+                    # Ghi lại data.yaml
+                    with open(data_train_dir, 'w') as file:
+                        yaml.dump(data_yaml, file, default_flow_style=False, sort_keys=False)
+
+                files = [os.path.join(weight_path, filename) for filename in os.listdir(weight_path) if os.path.isfile(os.path.join(weight_path, filename))]
+                if len(files) > 0:
+                    model = YOLO(files[0])
+                else:
+                    model = YOLO("yolov8n.pt")
+            
+                train_dir = f"./yolov8/{project_id}"
+                result = model.train(data=data_train_dir, imgsz=imgsz, epochs=epochs, project=train_dir)
+
+                subdirs = [os.path.join(train_dir, d) for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
+                latest_subdir = max(subdirs, key=os.path.getmtime)
+
+                checkpoint_model = f'{latest_subdir}/weights/last.pt'
+                # best_model = f'{latest_subdir}/weights/best.pt'
+                if kwargs.get("checkpoint"):
+                    upload_checkpoint(checkpoint_model)
+
                 return {"message": "train completed successfully"}
+            
             except Exception as e:
+                print(e)
                 return {"message": f"train failed: {e}"}
+            # try:
+            #     checkpoint = kwargs.get("checkpoint")
+            #     if checkpoint:
+            #         model = YOLO(f"checkpoints/uploads/{checkpoint}")
+            #     else:
+            #         model = YOLO("yolov8n.pt")
+
+            #     epochs = kwargs.get("epochs", 2)
+            #     imgsz = kwargs.get("imgsz", 640)
+            #     data = kwargs.get("data", "coco8.yaml")
+            #     # check if folder named project exists
+            #     if not os.path.exists(f"./yolov8/{project}"):
+            #         os.makedirs(f"./yolov8/{project}")
+            #     result = model.train(data=data, imgsz=imgsz, epochs=epochs, project=f"./yolov8/{project}")
+            #     return {"message": "train completed successfully"}
+            # except Exception as e:
+            #     return {"message": f"train failed: {e}"}
+        
         elif command.lower() == "predict":
             try:
                 checkpoint = kwargs.get("checkpoint")
@@ -198,6 +320,7 @@ class MyModel(AIxBlockMLBase):
                     return {"message": "predict failed", "result": None}
             except:
                 return {"message": "predict failed", "result": None}
+        
         else:
             return {"message": "command not supported", "result": None}
 
