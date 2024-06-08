@@ -27,4 +27,4 @@ services:
       - redis
     volumes:
       - "./data/server:/data"
-      - "./logs:/tmp"
+      - "./logs:/app/logs"
