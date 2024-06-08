@@ -3,11 +3,11 @@ from typing import List, Dict, Optional
 from aixblock_ml.model import AIxBlockMLBase
 from ultralytics import YOLO
 import os
-from git import Repo
+# from git import Repo
 import zipfile
 import subprocess
 import requests
-from IPython.display import Image
+# from IPython.display import Image
 import yaml
 
 HOST_NAME = os.environ.get('HOST_NAME',"https://app.aixblock.io")
@@ -217,7 +217,7 @@ class MyModel(AIxBlockMLBase):
               
         if command.lower() == "train":
             try:
-                clone_dir = os.path.join(os.getcwd(), "yolov8")
+                clone_dir = os.path.join(os.getcwd())
                 
                 epochs = kwargs.get("epochs", 2)
                 imgsz = kwargs.get("imgsz", 640)
@@ -261,8 +261,7 @@ class MyModel(AIxBlockMLBase):
                     model = YOLO(files[0])
                 else:
                     model = YOLO("yolov8n.pt")
-            
-                train_dir = f"./yolov8/{project_id}"
+                train_dir = os.path.join(os.getcwd(),"{project_id}")
                 result = model.train(data=data_train_dir, imgsz=imgsz, epochs=epochs, project=train_dir)
 
                 subdirs = [os.path.join(train_dir, d) for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
@@ -296,6 +295,12 @@ class MyModel(AIxBlockMLBase):
             # except Exception as e:
             #     return {"message": f"train failed: {e}"}
         
+        elif command.lower() == "tensorboard":
+            train_dir = os.path.join(os.getcwd(),"{project_id}")
+            p = subprocess.Popen("tensorboard --logdir /app/logs --host 0.0.0.0 --port=6006 --load_fast=false", stdout=subprocess.PIPE, stderr=None, shell=True)
+            out = p.communicate()
+            print (out)
+            return {"message": "tensorboardx started successfully"}
         elif command.lower() == "predict":
             try:
                 checkpoint = kwargs.get("checkpoint")
@@ -565,7 +570,7 @@ class MyModel(AIxBlockMLBase):
 
         def mt_tab_changed(tab):
             if tab == "Download":
-                get_checkpoint_list(project=project)
+                mt_get_checkpoint_list(project=project)
 
         def mt_upload_file(file):
             return "File uploaded!"

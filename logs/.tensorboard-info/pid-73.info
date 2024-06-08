@@ -1,0 +1,10 @@
+{
+    "cache_key": "eyJhcmd1bWVudHMiOlsiLS1sb2dkaXIiLCIvYXBwL2xvZ3MiLCItLWhvc3QiLCIwLjAuMC4wIiwiLS1wb3J0PTYwMDYiLCItLWxvYWRfZmFzdD1mYWxzZSJdLCJjb25maWd1cmVfa3dhcmdzIjp7fSwid29ya2luZ19kaXJlY3RvcnkiOiIvYXBwIn0=",
+    "db": "",
+    "logdir": "/app/logs",
+    "path_prefix": "",
+    "pid": 73,
+    "port": 6006,
+    "start_time": 1717838980,
+    "version": "2.15.1"
+}

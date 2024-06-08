@@ -1,3 +1,4 @@
+from multiprocessing import Process
 import os
 import argparse
 import logging
@@ -19,8 +20,23 @@ def get_kwargs_from_config(config_path=_DEFAULT_CONFIG_PATH):
     assert isinstance(config, dict)
     return config
 
+def tensorboard_main(host, port, logdir):
+    configuration = list([""])
+    configuration.extend(["--host", host])
+    configuration.extend(["--port", port])
+    configuration.extend(["--logdir", logdir])
+
+    tensorboard = tensorboard()
+    tensorboard.configure(configuration)
+    tensorboard.main()
+
+
+def flask_main(app, host, port):
+    return app.run(host=host, port=port)
 
 if __name__ == "__main__":
+    
+
     parser = argparse.ArgumentParser(description='Label studio')
     parser.add_argument(
         '-p', '--port', dest='port', type=int, default=9090,
@@ -89,9 +105,8 @@ if __name__ == "__main__":
         redis_port=os.environ.get('REDIS_PORT', 6379),
         **kwargs
     )
-
-    app.run(host=args.host, port=args.port, debug=args.debug, ssl_context=('/Users/macbookpro16/ml-backend/yolov8/ml.crt', '/Users/macbookpro16/ml-backend/yolov8/ml.key'))
-
+    #, ssl_context=('/Users/macbookpro16/ml-backend/yolov8/ml.crt', '/Users/macbookpro16/ml-backend/yolov8/ml.key')
+    app.run(host=args.host, port=args.port, debug=args.debug)
 else:
     # for uWSGI use
     app = init_app(

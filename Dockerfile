@@ -55,8 +55,8 @@ ENV PYTHONUNBUFFERED=True \
 
 RUN python3.10 -m pip install --upgrade Flask
 RUN python3.10 -m pip install gradio==3.43.1
+
 COPY . ./
 EXPOSE 9090 6006
-
 CMD exec gunicorn --preload --bind :$PORT --workers 1 --threads 8 --timeout 0 _wsgi:app
 

@@ -15,3 +15,4 @@ colorama
 lxml
 appdirs
 ultralytics
+gitpython

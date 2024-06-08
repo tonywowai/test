@@ -20,6 +20,7 @@ services:
       - AIXBLOCK_USE_REDIS=true
     ports:
       - 9090:9090
+      - 6006:6006
     depends_on:
       - redis
     links:
