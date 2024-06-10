@@ -18,6 +18,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - AIXBLOCK_USE_REDIS=true
+      - HOSTNAME=https://app.aixblock.io
     ports:
       - 9090:9090
       - 6006:6006
