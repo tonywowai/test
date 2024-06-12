@@ -105,8 +105,8 @@ if __name__ == "__main__":
         redis_port=os.environ.get('REDIS_PORT', 6379),
         **kwargs
     )
-    #, ssl_context=('/Users/macbookpro16/ml-backend/yolov8/ml.crt', '/Users/macbookpro16/ml-backend/yolov8/ml.key')
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    #
+    app.run(host=args.host, port=args.port, debug=args.debug, ssl_context=('/app/cert.pem', '/app/privkey.pem'))
 else:
     # for uWSGI use
     app = init_app(

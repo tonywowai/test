@@ -16,3 +16,4 @@ lxml
 appdirs
 ultralytics
 gitpython
+centrifuge

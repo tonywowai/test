@@ -18,10 +18,11 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - AIXBLOCK_USE_REDIS=true
-      - HOSTNAME=https://app.aixblock.io
+      - HOSTNAME=https://dev.aixblock.io
     ports:
       - 9090:9090
       - 6006:6006
+      - 12345:12345
     depends_on:
       - redis
     links:

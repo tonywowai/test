@@ -9,8 +9,151 @@ import subprocess
 import requests
 # from IPython.display import Image
 import yaml
+import threading
+import shutil
 
-HOST_NAME = os.environ.get('HOST_NAME',"https://app.aixblock.io")
+import asyncio
+import logging
+import signal
+import logging
+
+
+from centrifuge import CentrifugeError, Client, ClientEventHandler, SubscriptionEventHandler
+
+import base64
+import hmac
+import json
+import hashlib
+
+def promethus(job):
+    from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+    from prometheus_client.exposition import basic_auth_handler
+
+    def my_auth_handler(url, method, timeout, headers, data):
+        username = 'admin'
+        password = 'admin'
+        return basic_auth_handler(url, method, timeout, headers, data, username, password)
+
+    registry = CollectorRegistry()
+    g = Gauge('job_last_success_unixtime', 'Last time a batch job successfully finished', registry=registry)
+    g.set_to_current_time()
+    push_to_gateway('103.160.78.156:9091', job=job, registry=registry, handler=my_auth_handler)
+
+def base64url_encode(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+def generate_jwt(user, channel=""):
+    """Note, in tests we generate token on client-side - this is INSECURE
+    and should not be used in production. Tokens must be generated on server-side."""
+    hmac_secret = "secret"  # noqa: S105 - this is just a secret used in tests.
+    header = {"typ": "JWT", "alg": "HS256"}
+    payload = {"sub": user}
+    if channel:
+        # Subscription token
+        payload["channel"] = channel
+    encoded_header = base64url_encode(json.dumps(header).encode("utf-8"))
+    encoded_payload = base64url_encode(json.dumps(payload).encode("utf-8"))
+    signature_base = encoded_header + b"." + encoded_payload
+    signature = hmac.new(hmac_secret.encode("utf-8"), signature_base, hashlib.sha256).digest()
+    encoded_signature = base64url_encode(signature)
+    jwt_token = encoded_header + b"." + encoded_payload + b"." + encoded_signature
+    return jwt_token.decode("utf-8")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+cf_logger = logging.getLogger("centrifuge")
+cf_logger.setLevel(logging.DEBUG)
+
+async def get_client_token() -> str:
+    return generate_jwt("42")
+
+async def get_subscription_token(channel: str) -> str:
+    return generate_jwt("42", channel)
+
+class ClientEventLoggerHandler(ClientEventHandler):
+    async def on_connected(self, ctx):
+        logging.info("Connected to server")
+
+class SubscriptionEventLoggerHandler(SubscriptionEventHandler):
+    async def on_subscribed(self, ctx):
+        logging.info("Subscribed to channel")
+
+def setup_client():
+    client = Client(
+        "ws://103.160.78.156:8000/connection/websocket",
+        events=ClientEventLoggerHandler(),
+        get_token=get_client_token,
+        use_protobuf=False,
+    )
+
+    sub = client.new_subscription(
+        "training_logs",
+        events=SubscriptionEventLoggerHandler(),
+        get_token=get_subscription_token,
+    )
+
+    return client, sub
+
+async def send_log(sub, log_message):
+    try:
+        await sub.publish(data={"log": log_message})
+    except CentrifugeError as e:
+        logging.error("Error publish: %s", e)
+
+# def log_training_progress(log_message):
+#     client.disconnect()  # Đóng kết nối
+
+async def log_training_progress(sub, log_message):
+    await send_log(sub, log_message)
+
+def run_train(model, data_train_dir, imgsz, epochs, train_dir):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    client, sub = setup_client()
+
+    async def main():
+        await client.connect()
+        await sub.subscribe()
+        await log_training_progress(sub, "Training started")
+        await log_training_progress(sub, "Training training")
+        promethus("trainig")
+        res = model.train(data=data_train_dir, imgsz=imgsz, epochs=epochs, project=train_dir)
+        promethus("finish")
+        
+        await log_training_progress(sub, "Training completed")
+        await client.disconnect()
+        loop.stop()  # Dừng vòng lặp khi client ngắt kết nối
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()  # Đảm bảo vòng lặp được đóng lại hoàn toàn
+    # client.disconnect()
+
+def fetch_logs():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    client, sub = setup_client()
+
+    async def run():
+        await client.connect()
+        await sub.subscribe()
+        history = await sub.history(limit=-1)
+        logs = []
+        for pub in history.publications:
+            log_message = pub.data.get('log')
+            if log_message:
+                logs.append(log_message)
+        await client.disconnect()
+        return logs
+
+    return loop.run_until_complete(run())
+
+HOST_NAME = os.environ.get('HOST_NAME',"http://127.0.0.1:8080")
 
 css = """
 @import "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css";
@@ -130,44 +273,54 @@ def download_checkpoint(weight_zip_path, project_id, checkpoint_id, token):
     response = requests.request("GET", url, headers=headers, data=payload) 
     checkpoint_name = response.headers.get('X-Checkpoint-Name')
 
-    with open(weight_zip_path, 'wb') as f:
-        f.write(response.content)
-
-    return checkpoint_name
+    if response.status_code == 200:
+        with open(weight_zip_path, 'wb') as f:
+            f.write(response.content)
+        return checkpoint_name
+    
+    else: 
+        return None
 
 def download_dataset(data_zip_dir, project_id, dataset_id, token):
     # data_zip_path = os.path.join(data_zip_dir, "data.zip")
     url = f"{HOST_NAME}/api/dataset_model_marketplace/download/{dataset_id}?project_id={project_id}"
     payload = {}
     headers = {
-    'accept': 'application/json',
-    'Authorization': f'Token {token}'
+        'accept': 'application/json',
+        'Authorization': f'Token {token}'
     }
 
-    response = requests.request("GET", url, headers=headers, data=payload) 
-    dataset_name = response.headers.get('X-Checkpoint-Name')
-    with open(data_zip_dir, 'wb') as f:
-        f.write(response.content)
-    
-    return dataset_name
+    response = requests.request("GET", url, headers=headers, data=payload)
+    dataset_name = response.headers.get('X-Dataset-Name')
+    if response.status_code == 200:
+        with open(data_zip_dir, 'wb') as f:
+            f.write(response.content)
+        return dataset_name
+    else:
+        return None
 
 def upload_checkpoint(checkpoint_model_dir, project_id, token):
     url = f"{HOST_NAME}/api/checkpoint_model_marketplace/upload/"
 
     payload = {
         "type_checkpoint": "ml_checkpoint",
-        "project_id": f'{project_id}'
+        "project_id": f'{project_id}',
+        "is_training": True
     }
     headers = {
-    'accept': 'application/json',
-    'Authorization': f'Token {token}'
+        'accept': 'application/json',
+        'Authorization': f'Token {token}'
     }
+
+    checkpoint_name = None
 
     # response = requests.request("POST", url, headers=headers, data=payload) 
     with open(checkpoint_model_dir, 'rb') as file:
         files = {'file': file}
         response = requests.post(url, headers=headers, files=files, data=payload)
-        print(response.text)
+        checkpoint_name = response.headers.get('X-Checkpoint-Name')
+
+    return checkpoint_name
 
 class MyModel(AIxBlockMLBase):
 
@@ -209,73 +362,93 @@ class MyModel(AIxBlockMLBase):
     def action(self, project, command, collection, **kwargs):
 
         print(f"""
-              project: {project},
+                project: {project},
                 command: {command},
                 collection: {collection},
                 kwargs: {kwargs}
-              """)
+            """)
               
         if command.lower() == "train":
             try:
                 clone_dir = os.path.join(os.getcwd())
-                
+
                 epochs = kwargs.get("epochs", 2)
                 imgsz = kwargs.get("imgsz", 640)
                 project_id = kwargs.get("project_id")
                 token = kwargs.get("token")
+                checkpoint_version = kwargs.get("checkpoint_version")
+                checkpoint_id = kwargs.get("checkpoint")
+                dataset_version = kwargs.get("dataset_version")
+                dataset_id = kwargs.get("dataset")
 
-                os.makedirs(f'{clone_dir}/data_zip', exist_ok=True)
+                def func_train_model(clone_dir, project_id, imgsz, epochs, token, checkpoint_version, checkpoint_id, dataset_version, dataset_id):
+                    os.makedirs(f'{clone_dir}/data_zip', exist_ok=True)
 
-                weight_path = os.path.join(clone_dir, f"models")
-                dataset_path = os.path.join(clone_dir, f"datasets/dataset0") 
-                data_train_dir = os.path.join(dataset_path, "dota8.yaml")
+                    weight_path = os.path.join(clone_dir, f"models")
+                    dataset_path = os.path.join(clone_dir, f"datasets/dataset0") 
+                    data_train_dir = os.path.join(dataset_path, "dota8.yaml")
 
-                if kwargs.get("checkpoint"):
-                    checkpoint_id = kwargs.get("checkpoint")
-                    weight_zip_path = os.path.join(clone_dir, "data_zip/weights.zip")
-                    checkpoint_name = download_checkpoint(weight_zip_path, project_id, checkpoint_id, token)
-                    weight_path = os.path.join(clone_dir, f"models/{checkpoint_name}")
-                    if not os.path.exists(weight_path):
-                        with zipfile.ZipFile(weight_zip_path, 'r') as zip_ref:
-                            zip_ref.extractall(weight_path)
 
-                if  kwargs.get("dataset"):
-                    dataset_id = kwargs.get("dataset")
-                    data_zip_dir = os.path.join(clone_dir, "data_zip/data.zip")
-                    dataset_name = download_dataset(data_zip_dir, project_id, dataset_id, token)
-                    dataset_path = os.path.join(clone_dir, f"datasets/{dataset_name}")
-                    if not os.path.exists(dataset_path):
-                        with zipfile.ZipFile(data_zip_dir, 'r') as zip_ref:
-                            zip_ref.extractall(dataset_path)
+                    if checkpoint_version and checkpoint_id:
+                        weight_path = os.path.join(clone_dir, f"models/{checkpoint_version}")
+                        if not os.path.exists(weight_path):
+                            weight_zip_path = os.path.join(clone_dir, "data_zip/weights.zip")
+                            checkpoint_name = download_checkpoint(weight_zip_path, project_id, checkpoint_id, token)
+                            if checkpoint_name:
+                                # weight_path = os.path.join(clone_dir, f"models/{checkpoint_name}")
+                                # if not os.path.exists(weight_path):
+                                with zipfile.ZipFile(weight_zip_path, 'r') as zip_ref:
+                                    zip_ref.extractall(weight_path)
 
-                        data_train_dir = os.path.join(dataset_path, "data.yaml")
-                        with open(data_train_dir, 'r') as file:
-                            data_yaml = yaml.safe_load(file)
-                        
-                        # Thay thế các đường dẫn
-                        data_yaml['train'] = os.path.join('train', 'images')
-                        data_yaml['val'] = os.path.join('valid', 'images')
-                        data_yaml['test'] = os.path.join('test', 'images')
+                    if dataset_version and dataset_id:
+                        dataset_path = os.path.join(clone_dir, f"datasets/{dataset_version}")
+                        if not os.path.exists(dataset_path):
+                            data_zip_dir = os.path.join(clone_dir, "data_zip/data.zip")
+                            dataset_name = download_dataset(data_zip_dir, project_id, dataset_id, token)
+                            if dataset_name: 
+                                # if not os.path.exists(dataset_path):
+                                with zipfile.ZipFile(data_zip_dir, 'r') as zip_ref:
+                                    zip_ref.extractall(dataset_path)
 
-                        # Ghi lại data.yaml
-                        with open(data_train_dir, 'w') as file:
-                            yaml.dump(data_yaml, file, default_flow_style=False, sort_keys=False)
+                                data_train_dir = os.path.join(dataset_path, "data.yaml")
+                                with open(data_train_dir, 'r') as file:
+                                    data_yaml = yaml.safe_load(file)
+                                
+                                # Thay thế các đường dẫn
+                                data_yaml['train'] = os.path.join('train', 'images')
+                                data_yaml['val'] = os.path.join('valid', 'images')
+                                data_yaml['test'] = os.path.join('test', 'images')
 
-                files = [os.path.join(weight_path, filename) for filename in os.listdir(weight_path) if os.path.isfile(os.path.join(weight_path, filename))]
-                if len(files) > 0:
-                    model = YOLO(files[0])
-                else:
-                    model = YOLO("yolov8n.pt")
-                train_dir = os.path.join(os.getcwd(),"{project_id}")
-                result = model.train(data=data_train_dir, imgsz=imgsz, epochs=epochs, project=train_dir)
+                                # Ghi lại data.yaml
+                                with open(data_train_dir, 'w') as file:
+                                    yaml.dump(data_yaml, file, default_flow_style=False, sort_keys=False)
 
-                subdirs = [os.path.join(train_dir, d) for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
-                latest_subdir = max(subdirs, key=os.path.getmtime)
+                    files = [os.path.join(weight_path, filename) for filename in os.listdir(weight_path) if os.path.isfile(os.path.join(weight_path, filename))]
+                    if len(files) > 0:
+                        model = YOLO(files[0])
+                    else:
+                        model = YOLO("yolov8n.pt")
 
-                checkpoint_model = f'{latest_subdir}/weights/last.pt'
-                # best_model = f'{latest_subdir}/weights/best.pt'
-                if kwargs.get("checkpoint"):
-                    upload_checkpoint(checkpoint_model)
+                    train_dir = os.path.join(os.getcwd(),f"{project_id}")
+
+                    # model.train(data=data_train_dir, imgsz=imgsz, epochs=2, project=train_dir)
+                    run_train(model, data_train_dir, imgsz, epochs, train_dir)
+                    
+                    subdirs = [os.path.join(train_dir, d) for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
+                    latest_subdir = max(subdirs, key=os.path.getmtime)
+                    checkpoint_model = f'{latest_subdir}/weights/last.pt'
+                    # best_model = f'{latest_subdir}/weights/best.pt'
+                    if os.path.exists(checkpoint_model):
+                        # print(checkpoint_model)
+                        checkpoint_name = upload_checkpoint(checkpoint_model, project_id, token)
+                        if checkpoint_name:
+                            weight_path_final = os.path.join(clone_dir, "models", checkpoint_name)
+                            os.makedirs(weight_path_final, exist_ok=True)
+                            shutil.copy(checkpoint_model, weight_path_final)
+
+                train_thread = threading.Thread(target=func_train_model, args=(clone_dir, project_id, imgsz, epochs, token, checkpoint_version, checkpoint_id, dataset_version, dataset_id, ))
+
+                train_thread.start()
 
                 return {"message": "train completed successfully"}
             
@@ -306,30 +479,163 @@ class MyModel(AIxBlockMLBase):
             out = p.communicate()
             print (out)
             return {"message": "tensorboardx started successfully"}
+        
         elif command.lower() == "predict":
             try:
-                checkpoint = kwargs.get("checkpoint")
-                if checkpoint:
-                    model = YOLO(f"checkpoints/uploads/{checkpoint}")
+                if kwargs.get("checkpoint_version") and kwargs.get("checkpoint"):
+                    checkpoint_version = kwargs.get("checkpoint_version")
+                    checkpoint_id = kwargs.get("checkpoint")
+                    weight_path = os.path.join(clone_dir, f"models/{checkpoint_version}")
+                    if not os.path.exists(weight_path):
+                        weight_zip_path = os.path.join(clone_dir, "data_zip/weights.zip")
+                        checkpoint_name = download_checkpoint(weight_zip_path, project_id, checkpoint_id, token)
+                        if checkpoint_name:
+                            # weight_path = os.path.join(clone_dir, f"models/{checkpoint_name}")
+                            # if not os.path.exists(weight_path):
+                            with zipfile.ZipFile(weight_zip_path, 'r') as zip_ref:
+                                zip_ref.extractall(weight_path)
+
+                    model = YOLO(weight_path)
                 else:
                     model = YOLO("yolov8n.pt")
+                
+                data = kwargs.get("data", "")
 
-                data = kwargs.get("data", {})
-                print(data)
-                if data != {}:
+                if data == "":
+                    data = "https://ultralytics.com/images/zidane.jpg"
 
-                    img = data.get("img", "https://ultralytics.com/images/zidane.jpg")
+                result = model(data["img"])
 
-                    result = model(img)
-
-                    return {"message": "predict completed successfully",
-                            "result": {"boxes": result[0].boxes.xyxy.tolist(),
-                                       "names": result[0].names,
-                                       "labels": result[0].boxes.cls.tolist()}}
-                else:
-                    return {"message": "predict failed", "result": None}
+                return {"message": "predict completed successfully",
+                        "result": {"boxes": result[0].boxes.xyxy.tolist(),
+                                    "names": result[0].names,
+                                    "labels": result[0].boxes.cls.tolist()}}
+                # else:
+                #     return {"message": "predict failed", "result": None}
             except:
                 return {"message": "predict failed", "result": None}
+        
+        elif command.lower() == "toolbar":
+            model = YOLO("yolov8n.pt")
+            data = kwargs.get("data", "")
+            result = model(data["img"])
+
+            return {"message": "predict completed successfully",
+                        "result": {"boxes": result[0].boxes.xyxy.tolist(),
+                                    "names": result[0].names,
+                                    "labels": result[0].boxes.cls.tolist()}}
+        
+        elif command.lower() == "train2":
+            try:
+                clone_dir = os.path.join(os.getcwd())
+
+                epochs = kwargs.get("epochs", 2)
+                imgsz = kwargs.get("imgsz", 640)
+                project_id = kwargs.get("project_id")
+                token = kwargs.get("token")
+                checkpoint_version = kwargs.get("checkpoint_version")
+                checkpoint_id = kwargs.get("checkpoint")
+                dataset_version = kwargs.get("dataset_version")
+                dataset_id = kwargs.get("dataset")
+
+                world_size = kwargs.get("world_size", 1)
+                rank = kwargs.get("rank", 0)
+                master_add = kwargs.get("master_add")
+                master_port = kwargs.get("master_port", 12345)
+
+                os.environ["RANK"] = str(rank)
+                os.environ["WORLD_SIZE"] = str(world_size)
+                os.environ["MASTER_ADD"] = master_add
+                os.environ["MASTER_PORT"] = str(master_port)
+
+                def func_train_model(clone_dir, project_id, imgsz, epochs, token, checkpoint_version, checkpoint_id, dataset_version, dataset_id):
+                    os.makedirs(f'{clone_dir}/data_zip', exist_ok=True)
+
+                    weight_path = os.path.join(clone_dir, f"models")
+                    dataset_path = os.path.join(clone_dir, f"datasets/dota8") 
+                    data_train_dir = os.path.join(dataset_path, "dota8.yaml")
+
+                    if checkpoint_version and checkpoint_id:
+                        weight_path = os.path.join(clone_dir, f"models/{checkpoint_version}")
+                        if not os.path.exists(weight_path):
+                            weight_zip_path = os.path.join(clone_dir, "data_zip/weights.zip")
+                            checkpoint_name = download_checkpoint(weight_zip_path, project_id, checkpoint_id, token)
+                            if checkpoint_name:
+                                # weight_path = os.path.join(clone_dir, f"models/{checkpoint_name}")
+                                # if not os.path.exists(weight_path):
+                                with zipfile.ZipFile(weight_zip_path, 'r') as zip_ref:
+                                    zip_ref.extractall(weight_path)
+
+                    if dataset_version and dataset_id:
+                        dataset_path = os.path.join(clone_dir, f"yolov9/datasets/{dataset_version}")
+                        if not os.path.exists(dataset_path):
+                            data_zip_dir = os.path.join(clone_dir, "yolov9/data_zip/data.zip")
+                            dataset_name = download_dataset(data_zip_dir, project_id, dataset_id, token)
+                            if dataset_name: 
+                                # if not os.path.exists(dataset_path):
+                                with zipfile.ZipFile(data_zip_dir, 'r') as zip_ref:
+                                    zip_ref.extractall(dataset_path)
+
+                                data_train_dir = os.path.join(dataset_path, "data.yaml")
+                                with open(data_train_dir, 'r') as file:
+                                    data_yaml = yaml.safe_load(file)
+                                
+                                # Thay thế các đường dẫn
+                                data_yaml['train'] = os.path.join('train', 'images')
+                                data_yaml['val'] = os.path.join('valid', 'images')
+                                data_yaml['test'] = os.path.join('test', 'images')
+
+                                # Ghi lại data.yaml
+                                with open(data_train_dir, 'w') as file:
+                                    yaml.dump(data_yaml, file, default_flow_style=False, sort_keys=False)
+
+                    # files = [os.path.join(weight_path, filename) for filename in os.listdir(weight_path) if os.path.isfile(os.path.join(weight_path, filename))]
+                    train_dir = os.path.join(os.getcwd(),f"yolov9/runs/train")
+
+                    script_path = os.path.join(os.getcwd(),f"yolov9/train.py")
+                    print(data_train_dir)
+
+                    subprocess.run([
+                        "python3", script_path,
+                        "--workers", "8",
+                        "--device", "0",
+                        "--batch", "2",
+                        "--data", f"{data_train_dir}",
+                        "--img", f"{imgsz}",
+                        "--cfg", "./yolov9/models/detect/yolov9-c.yaml",
+                        "--weights", "''",
+                        "--name", "yolov9-c",
+                        "--hyp", "hyp.scratch-high.yaml",
+                        "--min-items", "0",
+                        "--epochs", f"{epochs}",
+                        "--close-mosaic", "15"
+                    ])
+                    
+                    subdirs = [os.path.join(train_dir, d) for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
+                    latest_subdir = max(subdirs, key=os.path.getmtime)
+                    checkpoint_model = f'{latest_subdir}/weights/last.pt'
+                    # best_model = f'{latest_subdir}/weights/best.pt'
+                    if os.path.exists(checkpoint_model):
+                        # print(checkpoint_model)
+                        checkpoint_name = upload_checkpoint(checkpoint_model, project_id, token)
+                        if checkpoint_name:
+                            weight_path_final = os.path.join(clone_dir, "models", checkpoint_name)
+                            os.makedirs(weight_path_final, exist_ok=True)
+                            shutil.copy(checkpoint_model, weight_path_final)
+
+                train_thread = threading.Thread(target=func_train_model, args=(clone_dir, project_id, imgsz, epochs, token, checkpoint_version, checkpoint_id, dataset_version, dataset_id, ))
+
+                train_thread.start()
+
+                return {"message": "train completed successfully"}
+            
+            except Exception as e:
+                print(e)
+                return {"message": f"train failed: {e}"}
+            
+        elif command.lower() == "logs":
+            logs = fetch_logs()
+            return {"message": "command not supported", "result": logs}
         
         else:
             return {"message": "command not supported", "result": None}
@@ -609,7 +915,7 @@ class MyModel(AIxBlockMLBase):
                     gr.Markdown("Dataset template to prepare your own and initiate training")
                     # with gr.Row():
                     # get all filename in datasets folder
-                    datasets = [(f"dataset{i}", name) for i, name in enumerate(os.listdir('./yolov8/datasets'))]
+                    datasets = [(f"dataset{i}", name) for i, name in enumerate(os.listdir('./datasets'))]
                     dataset_choosen = gr.Dropdown(datasets, label="Choose dataset", show_label=False, interactive=True,
                                                   type="value")
                     # gr.Button("Download this dataset", variant="primary").click(download_btn, dataset_choosen, gr.HTML())

@@ -20,6 +20,13 @@ FROM wowai/base-hf:v1.12.0
 WORKDIR /tmp
 COPY requirements.txt .
 
+ENV MODEL_DIR=/data/models
+ENV RQ_QUEUE_NAME=default
+ENV REDIS_HOST=redis
+ENV REDIS_PORT=6379
+ENV AIXBLOCK_USE_REDIS=true
+ENV HOSTNAME=https://dev.aixblock.io
+
 COPY uwsgi.ini /etc/uwsgi
 RUN apt-get -qq update && \
    DEBIAN_FRONTEND=noninteractive \ 
@@ -46,6 +53,7 @@ WORKDIR /app
 COPY . ./
 RUN --mount=type=cache,target=/root/.cache 
 RUN pip install -r requirements.txt
+RUN pip install -r yolov9/requirements.txt
 
 WORKDIR /app
 
@@ -57,6 +65,6 @@ RUN python3.10 -m pip install --upgrade Flask
 RUN python3.10 -m pip install gradio==3.43.1
 
 COPY . ./
-EXPOSE 9090 6006
+EXPOSE 9090 6006 12345
 CMD exec gunicorn --preload --bind :$PORT --workers 1 --threads 8 --timeout 0 _wsgi:app
 
