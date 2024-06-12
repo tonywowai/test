@@ -596,7 +596,7 @@ class MyModel(AIxBlockMLBase):
                     print(data_train_dir)
 
                     subprocess.run([
-                        "python3", script_path,
+                        "python3.10", script_path,
                         "--workers", "8",
                         "--device", "0",
                         "--batch", "2",
