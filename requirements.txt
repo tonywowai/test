@@ -16,5 +16,5 @@ lxml
 appdirs
 ultralytics
 gitpython
-# setuptools
-# centrifuge
+centrifuge-python
+numpy

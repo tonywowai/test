@@ -9,8 +9,8 @@ services:
       - "./data/redis:/data"
     expose:
       - 6379
-  yolo:
-    container_name: v8
+  mnist:
+    container_name: mnist
     build: .
     environment:
       - MODEL_DIR=/data/models
@@ -18,11 +18,16 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - AIXBLOCK_USE_REDIS=true
-      - HOSTNAME=https://dev.aixblock.io
+      - HOST_NAME=https://dev.aixblock.io
+      - NCCL_SOCKET_IFNAME=eth0
+      - NCCL_NET_PLUGIN=""
+      - NCCL_IB_DISABLE=1
+      - NCCL_P2P_DISABLE=1
+      - NCCL_DEBUG=INFO
     ports:
       - 9090:9090
       - 6006:6006
-      - 12345:12345
+      - 23456:23456
     depends_on:
       - redis
     links:

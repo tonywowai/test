@@ -108,7 +108,7 @@ async def send_log(sub, log_message):
 async def log_training_progress(sub, log_message):
     await send_log(sub, log_message)
 
-def run_train(model, data_train_dir, imgsz, epochs, train_dir):
+def run_train2(command):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -120,7 +120,7 @@ def run_train(model, data_train_dir, imgsz, epochs, train_dir):
         await log_training_progress(sub, "Training started")
         await log_training_progress(sub, "Training training")
         promethus("trainig")
-        res = model.train(data=data_train_dir, imgsz=imgsz, epochs=epochs, project=train_dir)
+        subprocess.run(command)
         promethus("finish")
         
         await log_training_progress(sub, "Training completed")
@@ -131,7 +131,7 @@ def run_train(model, data_train_dir, imgsz, epochs, train_dir):
         loop.run_until_complete(main())
     finally:
         loop.close()  # Đảm bảo vòng lặp được đóng lại hoàn toàn
-    # client.disconnect()
+
 
 def fetch_logs():
     loop = asyncio.new_event_loop()
@@ -381,13 +381,18 @@ class MyModel(AIxBlockMLBase):
                 dataset_version = kwargs.get("dataset_version")
                 dataset_id = kwargs.get("dataset")
 
+                world_size = kwargs.get("world_size", "1")
+                rank = kwargs.get("rank", "0")
+                master_add = kwargs.get("master_add")
+                master_port = kwargs.get("master_port", "12345")
+                # local_rank = kwargs.get("local_rank", "0")
+
                 def func_train_model(clone_dir, project_id, imgsz, epochs, token, checkpoint_version, checkpoint_id, dataset_version, dataset_id):
                     os.makedirs(f'{clone_dir}/data_zip', exist_ok=True)
 
                     weight_path = os.path.join(clone_dir, f"models")
-                    dataset_path = os.path.join(clone_dir, f"datasets/dataset0") 
+                    dataset_path = os.path.join(clone_dir, f"datasets/dota8") 
                     data_train_dir = os.path.join(dataset_path, "dota8.yaml")
-
 
                     if checkpoint_version and checkpoint_id:
                         weight_path = os.path.join(clone_dir, f"models/{checkpoint_version}")
@@ -401,9 +406,9 @@ class MyModel(AIxBlockMLBase):
                                     zip_ref.extractall(weight_path)
 
                     if dataset_version and dataset_id:
-                        dataset_path = os.path.join(clone_dir, f"datasets/{dataset_version}")
+                        dataset_path = os.path.join(clone_dir, f"yolov9/datasets/{dataset_version}")
                         if not os.path.exists(dataset_path):
-                            data_zip_dir = os.path.join(clone_dir, "data_zip/data.zip")
+                            data_zip_dir = os.path.join(clone_dir, "yolov9/data_zip/data.zip")
                             dataset_name = download_dataset(data_zip_dir, project_id, dataset_id, token)
                             if dataset_name: 
                                 # if not os.path.exists(dataset_path):
@@ -423,21 +428,45 @@ class MyModel(AIxBlockMLBase):
                                 with open(data_train_dir, 'w') as file:
                                     yaml.dump(data_yaml, file, default_flow_style=False, sort_keys=False)
 
-                    files = [os.path.join(weight_path, filename) for filename in os.listdir(weight_path) if os.path.isfile(os.path.join(weight_path, filename))]
-                    if len(files) > 0:
-                        model = YOLO(files[0])
-                    else:
-                        model = YOLO("yolov8n.pt")
+                    # files = [os.path.join(weight_path, filename) for filename in os.listdir(weight_path) if os.path.isfile(os.path.join(weight_path, filename))]
+                    # train_dir = os.path.join(os.getcwd(),f"yolov9/runs/train")
+
+                    # script_path = os.path.join(os.getcwd(),f"yolov9/train.py")
 
                     train_dir = os.path.join(os.getcwd(),f"{project_id}")
+                    os.makedirs(train_dir, exist_ok=True)
 
-                    # model.train(data=data_train_dir, imgsz=imgsz, epochs=2, project=train_dir)
-                    run_train(model, data_train_dir, imgsz, epochs, train_dir)
-                    
-                    subdirs = [os.path.join(train_dir, d) for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
-                    latest_subdir = max(subdirs, key=os.path.getmtime)
-                    checkpoint_model = f'{latest_subdir}/weights/last.pt'
-                    # best_model = f'{latest_subdir}/weights/best.pt'
+                    # train_dir = os.path.join(os.getcwd(), "models")
+
+                    os.environ["LOGLEVEL"] = "ERROR"
+
+                    # result = subprocess.run(['lsof', '-t', '-i:' + str(master_port)], capture_output=True, text=True)
+
+                    # if result.returncode == 0:
+                    #     pids = result.stdout.strip().split('\n')
+                    #     if pids:
+                    #         for pid in pids:
+                    #             subprocess.run(['kill', '-9', pid])
+
+                    # Lệnh torchrun
+                    command = [
+                        "torchrun",
+                        "--nproc_per_node", "1", #< count gpu card in compute
+                        "--rdzv-backend", "c10d",
+                        "--node-rank", f'{rank}',
+                        "--nnodes", f'{world_size}',
+                        "--rdzv-endpoint", f'{master_add}:{master_port}',
+                        "--master-addr", f'{master_add}',
+                        "--master-port", f'{master_port}',
+                        "main.py",
+                        "--epochs", f'{epochs}',
+                        "--save_path", f'{train_dir}/last.pt'
+                    ]
+
+                    # subprocess.run(command)
+                    run_train2(command)
+                    checkpoint_model = f'{train_dir}/last.pt'
+
                     if os.path.exists(checkpoint_model):
                         # print(checkpoint_model)
                         checkpoint_name = upload_checkpoint(checkpoint_model, project_id, token)
@@ -455,23 +484,6 @@ class MyModel(AIxBlockMLBase):
             except Exception as e:
                 print(e)
                 return {"message": f"train failed: {e}"}
-            # try:
-            #     checkpoint = kwargs.get("checkpoint")
-            #     if checkpoint:
-            #         model = YOLO(f"checkpoints/uploads/{checkpoint}")
-            #     else:
-            #         model = YOLO("yolov8n.pt")
-
-            #     epochs = kwargs.get("epochs", 2)
-            #     imgsz = kwargs.get("imgsz", 640)
-            #     data = kwargs.get("data", "coco8.yaml")
-            #     # check if folder named project exists
-            #     if not os.path.exists(f"./yolov8/{project}"):
-            #         os.makedirs(f"./yolov8/{project}")
-            #     result = model.train(data=data, imgsz=imgsz, epochs=epochs, project=f"./yolov8/{project}")
-            #     return {"message": "train completed successfully"}
-            # except Exception as e:
-            #     return {"message": f"train failed: {e}"}
         
         elif command.lower() == "tensorboard":
             train_dir = os.path.join(os.getcwd(),"{project_id}")
@@ -525,118 +537,13 @@ class MyModel(AIxBlockMLBase):
                                     "names": result[0].names,
                                     "labels": result[0].boxes.cls.tolist()}}
         
-        elif command.lower() == "train2":
-            try:
-                clone_dir = os.path.join(os.getcwd())
-
-                epochs = kwargs.get("epochs", 2)
-                imgsz = kwargs.get("imgsz", 640)
-                project_id = kwargs.get("project_id")
-                token = kwargs.get("token")
-                checkpoint_version = kwargs.get("checkpoint_version")
-                checkpoint_id = kwargs.get("checkpoint")
-                dataset_version = kwargs.get("dataset_version")
-                dataset_id = kwargs.get("dataset")
-
-                world_size = kwargs.get("world_size", 1)
-                rank = kwargs.get("rank", 0)
-                master_add = kwargs.get("master_add")
-                master_port = kwargs.get("master_port", 12345)
-
-                os.environ["RANK"] = str(rank)
-                os.environ["WORLD_SIZE"] = str(world_size)
-                os.environ["MASTER_ADD"] = master_add
-                os.environ["MASTER_PORT"] = str(master_port)
-
-                def func_train_model(clone_dir, project_id, imgsz, epochs, token, checkpoint_version, checkpoint_id, dataset_version, dataset_id):
-                    os.makedirs(f'{clone_dir}/data_zip', exist_ok=True)
-
-                    weight_path = os.path.join(clone_dir, f"models")
-                    dataset_path = os.path.join(clone_dir, f"datasets/dota8") 
-                    data_train_dir = os.path.join(dataset_path, "dota8.yaml")
-
-                    if checkpoint_version and checkpoint_id:
-                        weight_path = os.path.join(clone_dir, f"models/{checkpoint_version}")
-                        if not os.path.exists(weight_path):
-                            weight_zip_path = os.path.join(clone_dir, "data_zip/weights.zip")
-                            checkpoint_name = download_checkpoint(weight_zip_path, project_id, checkpoint_id, token)
-                            if checkpoint_name:
-                                # weight_path = os.path.join(clone_dir, f"models/{checkpoint_name}")
-                                # if not os.path.exists(weight_path):
-                                with zipfile.ZipFile(weight_zip_path, 'r') as zip_ref:
-                                    zip_ref.extractall(weight_path)
-
-                    if dataset_version and dataset_id:
-                        dataset_path = os.path.join(clone_dir, f"yolov9/datasets/{dataset_version}")
-                        if not os.path.exists(dataset_path):
-                            data_zip_dir = os.path.join(clone_dir, "yolov9/data_zip/data.zip")
-                            dataset_name = download_dataset(data_zip_dir, project_id, dataset_id, token)
-                            if dataset_name: 
-                                # if not os.path.exists(dataset_path):
-                                with zipfile.ZipFile(data_zip_dir, 'r') as zip_ref:
-                                    zip_ref.extractall(dataset_path)
-
-                                data_train_dir = os.path.join(dataset_path, "data.yaml")
-                                with open(data_train_dir, 'r') as file:
-                                    data_yaml = yaml.safe_load(file)
-                                
-                                # Thay thế các đường dẫn
-                                data_yaml['train'] = os.path.join('train', 'images')
-                                data_yaml['val'] = os.path.join('valid', 'images')
-                                data_yaml['test'] = os.path.join('test', 'images')
-
-                                # Ghi lại data.yaml
-                                with open(data_train_dir, 'w') as file:
-                                    yaml.dump(data_yaml, file, default_flow_style=False, sort_keys=False)
-
-                    # files = [os.path.join(weight_path, filename) for filename in os.listdir(weight_path) if os.path.isfile(os.path.join(weight_path, filename))]
-                    train_dir = os.path.join(os.getcwd(),f"yolov9/runs/train")
-
-                    script_path = os.path.join(os.getcwd(),f"yolov9/train.py")
-                    print(data_train_dir)
-
-                    subprocess.run([
-                        "python3.10", script_path,
-                        "--workers", "8",
-                        "--device", "0",
-                        "--batch", "2",
-                        "--data", f"{data_train_dir}",
-                        "--img", f"{imgsz}",
-                        "--cfg", "./yolov9/models/detect/yolov9-c.yaml",
-                        "--weights", "''",
-                        "--name", "yolov9-c",
-                        "--hyp", "hyp.scratch-high.yaml",
-                        "--min-items", "0",
-                        "--epochs", f"{epochs}",
-                        "--close-mosaic", "15"
-                    ])
-                    
-                    subdirs = [os.path.join(train_dir, d) for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))]
-                    latest_subdir = max(subdirs, key=os.path.getmtime)
-                    checkpoint_model = f'{latest_subdir}/weights/last.pt'
-                    # best_model = f'{latest_subdir}/weights/best.pt'
-                    if os.path.exists(checkpoint_model):
-                        # print(checkpoint_model)
-                        checkpoint_name = upload_checkpoint(checkpoint_model, project_id, token)
-                        if checkpoint_name:
-                            weight_path_final = os.path.join(clone_dir, "models", checkpoint_name)
-                            os.makedirs(weight_path_final, exist_ok=True)
-                            shutil.copy(checkpoint_model, weight_path_final)
-
-                train_thread = threading.Thread(target=func_train_model, args=(clone_dir, project_id, imgsz, epochs, token, checkpoint_version, checkpoint_id, dataset_version, dataset_id, ))
-
-                train_thread.start()
-
-                return {"message": "train completed successfully"}
-            
-            except Exception as e:
-                print(e)
-                return {"message": f"train failed: {e}"}
-            
         elif command.lower() == "logs":
             logs = fetch_logs()
             return {"message": "command not supported", "result": logs}
         
+        elif command.lower() == "stop":
+            subprocess.run(["pkill", "-9", "-f", "main.py"])
+            return {"message": "command not supported", "result": "Done"}
         else:
             return {"message": "command not supported", "result": None}
 
