@@ -1,0 +1,43 @@
+# Use an official Python runtime as a parent image
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV TRANSFORMERS_CACHE=/app/models
+ENV HF_HOME=/app/models
+# Set the working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    sox \
+    libsndfile1 \
+    git \
+--allow-unauthenticated \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip and setuptools
+RUN pip install --upgrade pip setuptools
+
+# Copy the requirements file and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . /app
+
+# Generate gRPC code
+RUN python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. seamless_m4t.proto
+RUN pip install git+https://github.com/huggingface/transformers.git sentencepiece
+# Download the model during the build
+RUN python -c "from transformers import AutoProcessor, SeamlessM4tV2Model; \
+    model_name = 'facebook/seamless-m4t-v2-large'; \
+    AutoProcessor.from_pretrained(model_name); \
+    SeamlessM4tV2Model.from_pretrained(model_name)"
+
+# Expose the port
+EXPOSE 50051
+
+# Command to run
+CMD ["python", "server51.py"]
+
