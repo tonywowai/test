@@ -2,4 +2,4 @@ torchaudio
 grpcio
 grpcio-tools
 protobuf
-
+transformers
